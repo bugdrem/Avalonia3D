@@ -1,0 +1,19 @@
+# Build results
+bin/
+obj/
+artifacts/
+
+# IDE
+.vs/
+.idea/
+*.user
+
+# PDB (发布目录体积大，按需分发)
+*.pdb
+
+# WorkBuddy 个人工作区数据（记忆等）
+.workbuddy/
+
+# 临时文件
+*.log
+*.tmp

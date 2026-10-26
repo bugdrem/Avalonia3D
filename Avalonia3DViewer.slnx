@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Avalonia3DViewer.Core/Avalonia3DViewer.Core.csproj" />
+    <Project Path="src/Avalonia3DViewer.Desktop/Avalonia3DViewer.Desktop.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Avalonia3DViewer.Core.Tests/Avalonia3DViewer.Core.Tests.csproj" />
+  </Folder>
+</Solution>

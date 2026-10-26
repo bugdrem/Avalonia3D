@@ -1,0 +1,159 @@
+<Window x:Class="Avalonia3DViewer.Desktop.MainWindow"
+        xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:Avalonia3DViewer.Desktop"
+        xmlns:core="clr-namespace:Avalonia3DViewer.Core.Annotations;assembly=Avalonia3DViewer.Core"
+        xmlns:controls="clr-namespace:Avalonia3DViewer.Desktop.Controls"
+        x:DataType="vm:ViewerSession"
+        Title="Avalonia3D 工业看图 · 打标 Demo"
+        Width="1400" Height="880"
+        MinWidth="1024" MinHeight="640"
+        RequestedThemeVariant="Light">
+
+    <Grid RowDefinitions="Auto,*,Auto">
+
+        <!-- ======================= 工具栏 ======================= -->
+        <Border Grid.Row="0" Background="#F4F7FB" BorderBrush="#D8DFE9" BorderThickness="0,0,0,1" Padding="10,6">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Button Content="打开模型…" Padding="10,5" Click="OnOpenModelClick"/>
+                <ComboBox x:Name="DemoModelBox" Width="120" SelectedIndex="0" SelectionChanged="OnDemoModelChanged">
+                    <ComboBoxItem Content="直齿轮"/>
+                    <ComboBoxItem Content="阶梯轴"/>
+                    <ComboBoxItem Content="六角螺母"/>
+                    <ComboBoxItem Content="圆环结"/>
+                </ComboBox>
+
+                <Separator Width="1" Margin="4,2" Background="#C9D3E0"/>
+
+                <TextBlock Text="视图" VerticalAlignment="Center" Margin="4,0,0,0" Foreground="#5A6675"/>
+                <ComboBox x:Name="ViewModeBox" Width="90" SelectedIndex="0" SelectionChanged="OnViewModeChanged">
+                    <ComboBoxItem Content="着色"/>
+                    <ComboBoxItem Content="线框"/>
+                    <ComboBoxItem Content="点云"/>
+                </ComboBox>
+
+                <TextBlock Text="方位" VerticalAlignment="Center" Margin="4,0,0,0" Foreground="#5A6675"/>
+                <Button Content="等轴测" Padding="8,5" Click="OnStandardViewClick" Tag="Isometric"/>
+                <Button Content="俯视" Padding="8,5" Click="OnStandardViewClick" Tag="Top"/>
+                <Button Content="正视" Padding="8,5" Click="OnStandardViewClick" Tag="Front"/>
+                <Button Content="侧视" Padding="8,5" Click="OnStandardViewClick" Tag="Right"/>
+
+                <Button Content="适应视图 (F)" Padding="8,5" Click="OnFitViewClick"/>
+                <Button Content="重置视角 (R)" Padding="8,5" Click="OnResetViewClick"/>
+
+                <Separator Width="1" Margin="4,2" Background="#C9D3E0"/>
+
+                <ToggleButton x:Name="SsaaToggle" Content="抗锯齿 2x" Padding="8,5" IsChecked="True" Click="OnSsaaToggleClick"/>
+                <ToggleButton x:Name="AnnotationToggle" Content="标注模式" Padding="8,5" Click="OnAnnotationToggleClick"/>
+                <ToggleButton x:Name="MoveToggle" Content="移动模型 (G)" Padding="8,5" Click="OnMoveToggleClick"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ======================= 主区域 ======================= -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="320"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 3D 视口 + 标注文字覆盖层 + 错误浮层 -->
+            <Grid Grid.Column="0">
+                <controls:ViewportControl x:Name="Viewport"/>
+                <Canvas x:Name="LabelLayer" IsHitTestVisible="False"/>
+                <Border IsVisible="{Binding HasViewportError}" Background="#CC1F2937" Padding="28"
+                        IsHitTestVisible="False">
+                    <TextBlock Text="{Binding ViewportError}" Foreground="White" FontSize="13"
+                               TextWrapping="Wrap" TextAlignment="Center"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+            </Grid>
+
+            <!-- 右侧面板 -->
+            <Border Grid.Column="1" Background="#FAFBFD" BorderBrush="#D8DFE9" BorderThickness="1,0,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
+                    <StackPanel Spacing="12">
+
+                        <!-- 模型信息 -->
+                        <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
+                            <StackPanel>
+                                <TextBlock Text="模型信息" FontWeight="Bold" Margin="0,0,0,6"/>
+                                <TextBlock Text="{Binding ModelInfo}" TextWrapping="Wrap" FontSize="12" LineHeight="18"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 模型坐标 -->
+                        <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="模型坐标（世界）" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Content="复位坐标" Padding="7,3" FontSize="11" Click="OnResetOffsetClick"/>
+                                </StackPanel>
+                                <TextBlock Text="{Binding ModelPositionText}" FontSize="14" FontWeight="Bold"
+                                           Foreground="#1F4E79" Margin="0,8,0,2"/>
+                                <TextBlock Text="开启「移动模型 (G)」后按住左键拖动模型即可改变坐标；"
+                                           FontSize="11" Foreground="#8A94A3" TextWrapping="Wrap"/>
+                                <TextBlock Text="拖动时按住 Shift 可锁定为水平 / 垂直单向移动。"
+                                           FontSize="11" Foreground="#8A94A3" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 标注与测量 -->
+                        <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="标注 / 测量" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Content="导出 JSON" Padding="7,3" FontSize="11" Click="OnExportAnnotationsClick"/>
+                                    <Button Content="清除" Padding="7,3" FontSize="11" Click="OnClearAnnotationsClick"/>
+                                </StackPanel>
+                                <TextBlock Text="开启「标注模式」后点击模型表面放置标注点"
+                                           FontSize="11" Foreground="#8A94A3" TextWrapping="Wrap"
+                                           Margin="0,4,0,8"/>
+                                <ItemsControl ItemsSource="{Binding Annotations.Items}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="core:Annotation">
+                                            <Border Margin="0,1" Padding="7,5" Background="#F5F8FC" CornerRadius="4">
+                                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                                    <Ellipse Width="10" Height="10" Fill="#E8721C" VerticalAlignment="Center"/>
+                                                    <StackPanel Grid.Column="1" Margin="7,0">
+                                                        <TextBlock Text="{Binding Label}" FontWeight="Bold" FontSize="12"/>
+                                                        <TextBlock Text="{Binding PositionText}" FontSize="10" Foreground="#7A8494"/>
+                                                    </StackPanel>
+                                                    <Button Grid.Column="2" Content="删除" FontSize="10" Padding="6,1"
+                                                            Click="OnDeleteAnnotationClick"/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Text="{Binding MeasurementText}" TextWrapping="Wrap" FontSize="12"
+                                           Foreground="#1E7A34" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 操作说明 -->
+                        <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
+                            <StackPanel>
+                                <TextBlock Text="操作说明" FontWeight="Bold" Margin="0,0,0,6"/>
+                                <TextBlock FontSize="12" LineHeight="20" TextWrapping="Wrap"
+                                           Text="左键拖拽：轨道旋转&#x0a;右键 / 中键拖拽：平移视图&#x0a;滚轮：缩放&#x0a;移动模型 (G)：左键拖动改模型坐标，Shift 锁轴&#x0a;双击模型：聚焦到该点&#x0a;Delete：删除选中标注&#x0a;Esc：退出标注 / 移动模式&#x0a;F：适应视图&#x0a;R：重置视角"/>
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <!-- ======================= 状态栏 ======================= -->
+        <Border Grid.Row="2" Background="#F4F7FB" BorderBrush="#D8DFE9" BorderThickness="0,1,0,0" Padding="10,4">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+                <TextBlock Grid.Column="0" Text="{Binding StatusText}" VerticalAlignment="Center"
+                           FontSize="12" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Column="1" Text="{Binding FpsText}" VerticalAlignment="Center"
+                           FontSize="12" Margin="16,0,0,0" MinWidth="70"/>
+                <TextBlock Grid.Column="2" Text="{Binding GlInfo}" VerticalAlignment="Center"
+                           FontSize="11" Foreground="#8A94A3" Margin="16,0,0,0"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

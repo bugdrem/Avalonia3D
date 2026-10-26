@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- WinExe = GUI 子系统（PE subsystem=2）：双击启动不会弹出控制台窗口。
+         若改为 Exe（CUI，subsystem=3），Windows 会先创建一个控制台窗口再启动程序。 -->
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Avalonia3DViewer.Desktop</RootNamespace>
+    <AssemblyName>Avalonia3DViewer</AssemblyName>
+    <ApplicationTitle>Avalonia3D 工业看图 · 打标 Demo</ApplicationTitle>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- NativeAOT：仅在 Release 发布时生效（dotnet publish -c Release -r <rid>） -->
+    <PublishAot>true</PublishAot>
+    <TrimMode>full</TrimMode>
+    <MetadataSerializer>false</MetadataSerializer>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Avalonia3DViewer.Core\Avalonia3DViewer.Core.csproj" />
+  </ItemGroup>
+
+</Project>

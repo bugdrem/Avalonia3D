@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Avalonia3DViewer.Core</RootNamespace>
+    <AssemblyName>Avalonia3DViewer.Core</AssemblyName>
+    <!-- 纯托管、零第三方依赖：完全兼容 NativeAOT / 全裁剪 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>
