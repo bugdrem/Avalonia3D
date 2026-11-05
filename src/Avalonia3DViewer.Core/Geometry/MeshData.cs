@@ -123,6 +123,125 @@ public sealed class MeshData
     /// <summary>
     /// 构建线框模式的线段索引（无重复边）。大网格（>30 万三角形）跳过去重以控制内存。
     /// </summary>
+    /// <summary>
+    /// 提取特征边（轮廓/折边）：相邻两三角面法线夹角超过阈值的边，或边界边。
+    /// 用于 2D 平面视图的 CAD 式轮廓绘制——比"所有三角边"干净得多，且只需在加载时计算一次。
+    /// 两个工程细节：
+    /// 1) STL/部分 OBJ 的顶点不共享，先按**位置量化**焊接，否则所有边都会被当成边界边；
+    /// 2) 导出工具常见绕序不一致（相邻共面面法线反向），用**边的遍历方向**判定并翻转后再比较角度。
+    /// </summary>
+    /// <param name="minAngleDegrees">折边阈值（度）。30° 适合机加工零件，能保留齿形/台阶又不画平滑面细分。</param>
+    public float[] BuildFeatureEdgeSegments(float minAngleDegrees = 30f)
+    {
+        int triCount = TriangleCount;
+        if (triCount == 0) return Array.Empty<float>();
+
+        float cosLimit = MathF.Cos(Math.Clamp(minAngleDegrees, 1f, 179f) * MathF.PI / 180f);
+        float eps = MathF.Max(Bounds.Size.Length() * 1e-5f, 1e-5f);
+
+        var canonical = new Dictionary<(int, int, int), int>(triCount * 3);
+        var canonicalPos = new List<Vector3>(triCount * 3);
+
+        // 1) 每个三角面的法线（原始坐标，避免量化误差影响角度判定）
+        var faceNormals = new Vector3[triCount];
+        for (int t = 0; t < triCount; t++)
+        {
+            int i = t * 3;
+            var a = VertexAt(Indices[i]);
+            var b = VertexAt(Indices[i + 1]);
+            var d = VertexAt(Indices[i + 2]);
+            var n = Vector3.Cross(b - a, d - a);
+            float len = n.Length();
+            faceNormals[t] = len > 1e-12f ? n / len : Vector3.Zero;
+        }
+
+        // 2) 位置焊接 + 边 → 相邻面及其遍历方向
+        var edgeFaces = new Dictionary<ulong, (int f0, int f1, bool asc0, bool asc1)>(triCount * 3);
+        for (int t = 0; t < triCount; t++)
+        {
+            int i = t * 3;
+            int c0 = Weld(Indices[i]);
+            int c1 = Weld(Indices[i + 1]);
+            int c2 = Weld(Indices[i + 2]);
+            Register(c0, c1, t);
+            Register(c1, c2, t);
+            Register(c2, c0, t);
+        }
+
+        // 3) 过滤并输出线段端点坐标
+        var result = new List<float>(edgeFaces.Count / 2 * 6);
+        foreach (var kv in edgeFaces)
+        {
+            var (f0, f1, asc0, asc1) = kv.Value;
+            bool keep = f1 < 0; // 边界边（单邻面）
+
+            if (!keep)
+            {
+                var n0 = faceNormals[f0];
+                var n1 = faceNormals[f1];
+                if (n0 == Vector3.Zero || n1 == Vector3.Zero)
+                {
+                    keep = true;
+                }
+                else
+                {
+                    // 两面对该边的遍历方向相同 ⇒ 绕序相反 ⇒ 法线翻转后再比较
+                    if (asc0 == asc1) n1 = -n1;
+                    keep = Vector3.Dot(n0, n1) < cosLimit;
+                }
+            }
+
+            if (!keep) continue;
+
+            int lo = (int)(kv.Key >> 32);
+            int hi = (int)(kv.Key & 0xFFFFFFFF);
+            var pa = canonicalPos[lo];
+            var pb = canonicalPos[hi];
+            result.Add(pa.X); result.Add(pa.Y); result.Add(pa.Z);
+            result.Add(pb.X); result.Add(pb.Y); result.Add(pb.Z);
+        }
+
+        return result.ToArray();
+
+        int Weld(uint index)
+        {
+            var p = VertexAt(index);
+            var key = (
+                (int)MathF.Round(p.X / eps),
+                (int)MathF.Round(p.Y / eps),
+                (int)MathF.Round(p.Z / eps));
+            if (!canonical.TryGetValue(key, out int id))
+            {
+                id = canonicalPos.Count;
+                canonical[key] = id;
+                canonicalPos.Add(p);
+            }
+            return id;
+        }
+
+        void Register(int a, int b, int face)
+        {
+            if (a == b) return; // 退化边
+            int lo = Math.Min(a, b);
+            int hi = Math.Max(a, b);
+            bool ascending = a < b;
+            ulong key = ((ulong)(uint)lo << 32) | (uint)hi;
+
+            if (edgeFaces.TryGetValue(key, out var existing))
+            {
+                if (existing.f1 < 0 && existing.f0 != face)
+                    edgeFaces[key] = (existing.f0, face, existing.asc0, ascending);
+            }
+            else
+            {
+                edgeFaces[key] = (face, -1, ascending, false);
+            }
+        }
+    }
+
+    private Vector3 VertexAt(uint index) => new(
+        Positions[index * 3], Positions[index * 3 + 1], Positions[index * 3 + 2]);
+
     public uint[] BuildEdgeIndices()
     {
         int triCount = TriangleCount;

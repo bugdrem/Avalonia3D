@@ -16,12 +16,9 @@
         <Border Grid.Row="0" Background="#F4F7FB" BorderBrush="#D8DFE9" BorderThickness="0,0,0,1" Padding="10,6">
             <StackPanel Orientation="Horizontal" Spacing="6">
                 <Button Content="打开模型…" Padding="10,5" Click="OnOpenModelClick"/>
-                <ComboBox x:Name="DemoModelBox" Width="120" SelectedIndex="0" SelectionChanged="OnDemoModelChanged">
-                    <ComboBoxItem Content="直齿轮"/>
-                    <ComboBoxItem Content="阶梯轴"/>
-                    <ComboBoxItem Content="六角螺母"/>
-                    <ComboBoxItem Content="圆环结"/>
-                </ComboBox>
+                <!-- 示例模型列表：启动时扫描 samples 目录填充，默认 teapot.obj -->
+                <ComboBox x:Name="SampleBox" Width="170" PlaceholderText="示例模型"
+                          SelectionChanged="OnSampleModelChanged"/>
 
                 <Separator Width="1" Margin="4,2" Background="#C9D3E0"/>
 
@@ -31,6 +28,8 @@
                     <ComboBoxItem Content="线框"/>
                     <ComboBoxItem Content="点云"/>
                 </ComboBox>
+
+                <ToggleButton x:Name="View2DToggle" Content="2D 视图 (T)" Padding="8,5" Click="On2DToggleClick"/>
 
                 <TextBlock Text="方位" VerticalAlignment="Center" Margin="4,0,0,0" Foreground="#5A6675"/>
                 <Button Content="等轴测" Padding="8,5" Click="OnStandardViewClick" Tag="Isometric"/>
@@ -43,7 +42,7 @@
 
                 <Separator Width="1" Margin="4,2" Background="#C9D3E0"/>
 
-                <ToggleButton x:Name="SsaaToggle" Content="抗锯齿 2x" Padding="8,5" IsChecked="True" Click="OnSsaaToggleClick"/>
+                <ToggleButton x:Name="SsaaToggle" Content="抗锯齿 2x（性能）" Padding="8,5" IsChecked="False" Click="OnSsaaToggleClick"/>
                 <ToggleButton x:Name="AnnotationToggle" Content="标注模式" Padding="8,5" Click="OnAnnotationToggleClick"/>
                 <ToggleButton x:Name="MoveToggle" Content="移动模型 (G)" Padding="8,5" Click="OnMoveToggleClick"/>
             </StackPanel>
@@ -135,7 +134,7 @@
                             <StackPanel>
                                 <TextBlock Text="操作说明" FontWeight="Bold" Margin="0,0,0,6"/>
                                 <TextBlock FontSize="12" LineHeight="20" TextWrapping="Wrap"
-                                           Text="左键拖拽：轨道旋转&#x0a;右键 / 中键拖拽：平移视图&#x0a;滚轮：缩放&#x0a;移动模型 (G)：左键拖动改模型坐标，Shift 锁轴&#x0a;双击模型：聚焦到该点&#x0a;Delete：删除选中标注&#x0a;Esc：退出标注 / 移动模式&#x0a;F：适应视图&#x0a;R：重置视角"/>
+                                           Text="T：2D 画布 / 3D 视图 切换（带过渡动画）&#x0a;3D：左键拖拽旋转，右键 / 中键平移&#x0a;2D：左键 / 右键拖拽均为平移&#x0a;滚轮：缩放&#x0a;移动模型 (G)：左键拖动改模型坐标，Shift 锁轴&#x0a;双击模型：聚焦到该点&#x0a;Delete：删除选中标注&#x0a;Esc：退出标注 / 移动模式&#x0a;F：适应视图&#x0a;R：重置视角"/>
                             </StackPanel>
                         </Border>
 

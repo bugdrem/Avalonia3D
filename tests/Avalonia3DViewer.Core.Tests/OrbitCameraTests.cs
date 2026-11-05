@@ -51,7 +51,12 @@ public class OrbitCameraTests
         var centerRay = camera.ScreenPointToRay(new Vector2(320, 240), new Vector2(640, 480));
         Assert.True(Vector3.Dot(camera.ForwardDirection, centerRay.Direction) > 0.999f,
             "屏幕中心射线应沿相机注视方向");
-        Assert.Equal(camera.EyePosition, centerRay.Origin);
+
+        // 射线起点位于近平面（反投影法，正交/透视统一），但相机眼点必须在射线直线上
+        var toOrigin = centerRay.Origin - camera.EyePosition;
+        var perpendicular = (toOrigin - centerRay.Direction * Vector3.Dot(toOrigin, centerRay.Direction)).Length();
+        Assert.True(perpendicular < 0.05f, $"眼点到射线直线的距离过大: {perpendicular}");
+        Assert.True(Vector3.Dot(toOrigin, centerRay.Direction) > 0f, "射线应背离相机眼点");
 
         // 左上角 → 方向偏左偏上
         var cornerRay = camera.ScreenPointToRay(new Vector2(0, 0), new Vector2(640, 480));

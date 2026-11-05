@@ -27,7 +27,9 @@ public readonly record struct FrameState(
     ViewMode Mode,
     bool SsaaEnabled,
     Vector3 BackgroundTop,
-    Vector3 BackgroundBottom);
+    Vector3 BackgroundBottom,
+    // FlatShade: 1 = 2D canvas (skip lighting, no grid distance fade), 0 = 3D view
+    float FlatShade = 0f);
 
 /// <summary>标注标记点（位置 + 颜色，颜色已按选中状态处理）。</summary>
 public readonly record struct MarkerVertex(Vector3 Position, Vector3 Color);
@@ -68,6 +70,9 @@ public sealed class GlRenderer : IDisposable
     private int _meshIndexCount;
     private int _edgeVao, _edgeVbo, _edgeEbo;
     private int _edgeIndexCount;
+    // 特征边（2D 平面视图的 CAD 式轮廓）
+    private int _featureEdgeVao, _featureEdgeVbo;
+    private int _featureEdgeVertexCount;
     private bool _meshUploaded;
 
     // ---- 地面网格 ----
@@ -147,6 +152,7 @@ public sealed class GlRenderer : IDisposable
         // 网格 / 标记 / 测距线缓冲
         _meshVao = gl.GenVertexArray(); _meshVbo = gl.GenBuffer(); _meshEbo = gl.GenBuffer();
         _edgeVao = gl.GenVertexArray(); _edgeVbo = gl.GenBuffer(); _edgeEbo = gl.GenBuffer();
+        _featureEdgeVao = gl.GenVertexArray(); _featureEdgeVbo = gl.GenBuffer();
         _gridVao = gl.GenVertexArray(); _gridVbo = gl.GenBuffer();
         _markerVao = gl.GenVertexArray(); _markerVbo = gl.GenBuffer();
         _measureVao = gl.GenVertexArray(); _measureVbo = gl.GenBuffer();
@@ -259,6 +265,9 @@ public sealed class GlRenderer : IDisposable
         {
             case ViewMode.Shaded:
                 DrawMesh(state);
+                // 2D 画布：平涂 + 特征边轮廓，得到干净的平面视图观感
+                if (state.FlatShade > 0.995f && _featureEdgeVertexCount > 0)
+                    DrawFeatureEdges(state);
                 break;
             case ViewMode.Wireframe:
                 DrawEdges(state);
@@ -313,6 +322,7 @@ public sealed class GlRenderer : IDisposable
         _meshProgram.SetMatrix("uProj", state.Proj);
         _meshProgram.SetVec3("uCameraPos", state.Eye);
         _meshProgram.SetFloat("uHighlight", 0f);
+        _meshProgram.SetFloat("uFlat", state.FlatShade);
         gl.BindVertexArray(_meshVao);
         gl.DrawElements(Glx.GL_TRIANGLES, _meshIndexCount, Glx.GL_UNSIGNED_INT, IntPtr.Zero);
     }
@@ -325,6 +335,16 @@ public sealed class GlRenderer : IDisposable
         SetupLineUniforms(state, depthBias: 0.0012f, useFade: 0f, model: state.Model);
         gl.BindVertexArray(_edgeVao);
         gl.DrawElements(Glx.GL_LINES, _edgeIndexCount, Glx.GL_UNSIGNED_INT, IntPtr.Zero);
+    }
+
+    /// <summary>绘制特征边（折边/边界），用于 2D 平面视图轮廓。</summary>
+    private void DrawFeatureEdges(in FrameState state)
+    {
+        var gl = _gl;
+        _lineProgram!.Use();
+        SetupLineUniforms(state, depthBias: 0.0010f, useFade: 0f, model: state.Model);
+        gl.BindVertexArray(_featureEdgeVao);
+        gl.DrawArrays(Glx.GL_LINES, 0, _featureEdgeVertexCount);
     }
 
     private void DrawMeshPoints(in FrameState state, int renderScale)
@@ -347,7 +367,9 @@ public sealed class GlRenderer : IDisposable
         var gl = _gl;
         _lineProgram!.Use();
         float dist = MathF.Max(state.Eye.Length(), 1f);
-        SetupLineUniforms(state, depthBias: 0f, useFade: 1f, fadeNear: dist * 0.35f, fadeFar: dist * 1.5f);
+        // 2D 画布不淡出（清晰网格背景），3D 视图保留距离淡出
+        float fade = 1f - Math.Clamp(state.FlatShade, 0f, 1f);
+        SetupLineUniforms(state, depthBias: 0f, useFade: fade, fadeNear: dist * 0.35f, fadeFar: dist * 1.5f);
         gl.BindVertexArray(_gridVao);
         gl.DrawArrays(Glx.GL_LINES, 0, _gridVertexCount);
     }
@@ -542,6 +564,33 @@ public sealed class GlRenderer : IDisposable
         gl.EnableVertexAttribArray(ec);
         gl.VertexAttribPointer(ec, 3, GlConsts.GL_FLOAT, 0, 24, new IntPtr(12));
         _edgeIndexCount = edges.Length;
+
+        // 特征边（2D 平面视图轮廓）：只保留折角 > 30° 的边与边界边
+        float[] segments = mesh.BuildFeatureEdgeSegments(30f);
+        var featureColor = new Vector3(0.13f, 0.15f, 0.18f);
+        int segmentVerts = segments.Length / 3;
+        var featureVerts = new float[segmentVerts * 6];
+        for (int v = 0; v < segmentVerts; v++)
+        {
+            int o = v * 6;
+            featureVerts[o + 0] = segments[v * 3 + 0];
+            featureVerts[o + 1] = segments[v * 3 + 1];
+            featureVerts[o + 2] = segments[v * 3 + 2];
+            featureVerts[o + 3] = featureColor.X;
+            featureVerts[o + 4] = featureColor.Y;
+            featureVerts[o + 5] = featureColor.Z;
+        }
+
+        gl.BindVertexArray(_featureEdgeVao);
+        gl.BindBuffer(GlConsts.GL_ARRAY_BUFFER, _featureEdgeVbo);
+        UploadBuffer(GlConsts.GL_ARRAY_BUFFER, featureVerts, GlConsts.GL_STATIC_DRAW);
+        int fp = _lineProgram!.Attrib("aPos");
+        int fc = _lineProgram!.Attrib("aColor");
+        gl.EnableVertexAttribArray(fp);
+        gl.VertexAttribPointer(fp, 3, GlConsts.GL_FLOAT, 0, 24, IntPtr.Zero);
+        gl.EnableVertexAttribArray(fc);
+        gl.VertexAttribPointer(fc, 3, GlConsts.GL_FLOAT, 0, 24, new IntPtr(12));
+        _featureEdgeVertexCount = featureVerts.Length / 6;
 
         gl.BindVertexArray(0);
     }
@@ -750,6 +799,7 @@ public sealed class GlRenderer : IDisposable
 
         gl.DeleteBuffer(_meshVbo); gl.DeleteBuffer(_meshEbo); gl.DeleteVertexArray(_meshVao);
         gl.DeleteBuffer(_edgeVbo); gl.DeleteBuffer(_edgeEbo); gl.DeleteVertexArray(_edgeVao);
+        gl.DeleteBuffer(_featureEdgeVbo); gl.DeleteVertexArray(_featureEdgeVao);
         gl.DeleteBuffer(_gridVbo); gl.DeleteVertexArray(_gridVao);
         gl.DeleteBuffer(_markerVbo); gl.DeleteVertexArray(_markerVao);
         gl.DeleteBuffer(_measureVbo); gl.DeleteVertexArray(_measureVao);

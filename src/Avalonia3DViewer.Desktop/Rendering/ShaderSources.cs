@@ -39,42 +39,39 @@ in vec3 vWorld;
 
 uniform mat4 uCameraPos;
 uniform float uHighlight;
+uniform float uFlat;      // 1 = unlit flat fill (2D canvas), skips all lighting math
 
 out vec4 fragColor;
 
 void main()
 {
+    // Flat fill color used by the 2D canvas and as the transition target
+    vec3 flatColor = vColor * 0.78 + vec3(0.05);
+
+    // Steady 2D: uniform branch -> no lighting instructions are executed at all
+    if (uFlat > 0.995)
+    {
+        vec3 c = mix(flatColor, vec3(1.0, 0.52, 0.14), uHighlight);
+        fragColor = vec4(c, 1.0);
+        return;
+    }
+
     vec3 n = normalize(vNormal);
     if (!gl_FrontFacing) n = -n;
 
-    vec3 eye = uCameraPos[3].xyz;
-    vec3 viewDir = normalize(eye - vWorld);
-
-    // hemispheric ambient (cool sky / warm ground)
+    // hemispheric ambient (sky / ground)
     vec3 sky = vec3(0.62, 0.68, 0.76);
     vec3 groundColor = vec3(0.42, 0.40, 0.37);
-    vec3 ambient = mix(groundColor, sky, n.y * 0.5 + 0.5) * 0.55;
+    vec3 ambient = mix(groundColor, sky, n.y * 0.5 + 0.5) * 0.62;
 
-    // key light (warm white, upper right front)
+    // single key light (no fill / rim / specular: performance first)
     vec3 keyDir = normalize(vec3(0.55, 0.78, 0.30));
     float diff = max(dot(n, keyDir), 0.0);
-    vec3 key = vec3(1.0, 0.97, 0.90) * diff * 0.72;
 
-    // fill light (cool, left back)
-    vec3 fillDir = normalize(vec3(-0.60, 0.22, -0.55));
-    float fdiff = max(dot(n, fillDir), 0.0);
-    vec3 fill = vec3(0.72, 0.80, 0.94) * fdiff * 0.22;
+    vec3 color = vColor * (ambient + diff * 0.68);
 
-    // rim light
-    float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.14;
-
-    // Blinn-Phong specular
-    vec3 halfDir = normalize(keyDir + viewDir);
-    float spec = pow(max(dot(n, halfDir), 0.0), 48.0) * 0.30;
-
-    vec3 color = vColor * (ambient + key + fill) + vec3(rim) + vec3(spec);
-
-    // selection highlight (orange shift)
+    // during the 2D<->3D transition, blend towards the flat look (temporary cost only)
+    color = mix(color, flatColor, uFlat);
     color = mix(color, vec3(1.0, 0.52, 0.14), uHighlight);
 
     fragColor = vec4(color, 1.0);

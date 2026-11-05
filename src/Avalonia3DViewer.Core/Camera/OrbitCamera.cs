@@ -12,6 +12,13 @@ public enum StandardView
     Right,    // 侧视（右）
 }
 
+/// <summary>视图布局：2D 画布（正交俯视）或 3D 视图（透视）。</summary>
+public enum ViewLayout
+{
+    ThreeD,
+    TwoD,
+}
+
 /// <summary>
 /// 轨道相机（轨道/平移/缩放 + 指数阻尼），全部状态与变换均为纯托管计算，便于单元测试。
 /// 坐标系：右手系，Y 向上，相机注视 -Z（与 OpenGL 一致）。
@@ -116,7 +123,8 @@ public sealed class OrbitCamera
 
     private void ClampPitch()
     {
-        float limit = MathF.PI / 2f - 0.01f;
+        // 允许接近 90°（2D 俯视需要），保留极小余量避免右向量退化
+        float limit = MathF.PI / 2f - 0.002f;
         Pitch = Math.Clamp(Pitch, -limit, limit);
     }
 
@@ -178,9 +186,24 @@ public sealed class OrbitCamera
 
     public Vector3 ForwardDirection => Vector3.Normalize(_curTarget - EyePosition);
 
-    public Vector3 RightDirection => Vector3.Normalize(Vector3.Cross(ForwardDirection, Vector3.UnitY));
+    /// <summary>相机右向量。俯视（视线接近 ±Y）时退化为 +X，避免叉积为零导致 NaN。</summary>
+    public Vector3 RightDirection
+    {
+        get
+        {
+            var r = Vector3.Cross(ForwardDirection, Vector3.UnitY);
+            return r.LengthSquared() < 1e-10f ? Vector3.UnitX : Vector3.Normalize(r);
+        }
+    }
 
-    public Vector3 UpDirection => Vector3.Normalize(Vector3.Cross(RightDirection, ForwardDirection));
+    public Vector3 UpDirection
+    {
+        get
+        {
+            var u = Vector3.Cross(RightDirection, ForwardDirection);
+            return u.LengthSquared() < 1e-10f ? Vector3.UnitZ : Vector3.Normalize(u);
+        }
+    }
 
     private static Vector3 OffsetFromAngles(float yaw, float pitch, float distance)
     {
@@ -193,8 +216,35 @@ public sealed class OrbitCamera
 
     public Matrix4x4 ViewMatrix => CreateLookAtGl(EyePosition, _curTarget, Vector3.UnitY);
 
+    /// <summary>
+    /// 投影类型混合：0 = 正交（2D 画布），1 = 透视（3D 视图）。
+    /// 中间值对两个投影矩阵做线性插值，得到视觉连续的"广义投影"过渡（w 从 1 渐变到视深）。
+    /// </summary>
+    public float ProjectionBlend { get; set; } = 1f;
+
+    public bool IsOrthographic => ProjectionBlend <= 0.001f;
+
+    /// <summary>
+    /// 正交投影半高：取当前距离下透视视锥的可见高度，保证正交↔透视切换时取景范围一致（无缩放跳变）。
+    /// </summary>
+    public float OrthoHalfHeight => _curDistance * MathF.Tan(FieldOfView * 0.5f);
+
+    public float OrthoHalfWidth => OrthoHalfHeight * MathF.Max(AspectRatio, 1e-3f);
+
     /// <summary>投影矩阵（OpenGL 约定，z∈[-1,1]；System.Numerics 的 CreatePerspective 为 DX 约定不可直接用）。</summary>
-    public Matrix4x4 ProjectionMatrix => CreatePerspectiveGl(FieldOfView, AspectRatio, NearPlane, FarPlane);
+    public Matrix4x4 ProjectionMatrix
+    {
+        get
+        {
+            var persp = CreatePerspectiveGl(FieldOfView, AspectRatio, NearPlane, FarPlane);
+            if (ProjectionBlend >= 0.999f) return persp;
+
+            var ortho = CreateOrthographicGl(OrthoHalfWidth, OrthoHalfHeight, NearPlane, FarPlane);
+            if (ProjectionBlend <= 0.001f) return ortho;
+
+            return LerpMatrix(ortho, persp, Math.Clamp(ProjectionBlend, 0f, 1f));
+        }
+    }
 
     public Matrix4x4 ViewProjection => ViewMatrix * ProjectionMatrix;
 
@@ -204,19 +254,37 @@ public sealed class OrbitCamera
 
     public float FarPlane => _curDistance + _modelRadius * 20f + 10f;
 
-    /// <summary>屏幕像素坐标（左上原点，y 向下）→ 世界射线。</summary>
+    /// <summary>
+    /// 屏幕像素坐标（左上原点，y 向下）→ 世界射线。
+    /// 用视图投影矩阵的逆矩阵反投影近/远两点，正交、透视与混合投影统一适用。
+    /// </summary>
     public Ray ScreenPointToRay(Vector2 screenPoint, Vector2 viewportSize)
     {
-        float ndcX = screenPoint.X / viewportSize.X * 2f - 1f;
-        float ndcY = 1f - screenPoint.Y / viewportSize.Y * 2f; // GL NDC y 向上
+        float ndcX = screenPoint.X / MathF.Max(viewportSize.X, 1f) * 2f - 1f;
+        float ndcY = 1f - screenPoint.Y / MathF.Max(viewportSize.Y, 1f) * 2f; // GL NDC y 向上
 
-        // 直接用相机基向量构造世界方向（与视图矩阵保持一致，避免矩阵转置歧义）。
-        // 相机空间视线为 -Z，对应世界空间 ForwardDirection。
+        if (Matrix4x4.Invert(ViewProjection, out var inv))
+        {
+            var near = Unproject(inv, ndcX, ndcY, -1f);
+            var far = Unproject(inv, ndcX, ndcY, 1f);
+            var dir = far - near;
+            if (dir.LengthSquared() > 1e-12f)
+                return new Geometry.Ray(near, dir);
+        }
+
+        // 退化回退：假设透视，用相机基向量构造方向
         float tanHalf = MathF.Tan(FieldOfView * 0.5f);
-        var dir = RightDirection * (ndcX * tanHalf * AspectRatio)
-                  + UpDirection * (ndcY * tanHalf)
-                  + ForwardDirection;
-        return new Geometry.Ray(EyePosition, Vector3.Normalize(dir));
+        var fallback = RightDirection * (ndcX * tanHalf * AspectRatio)
+                       + UpDirection * (ndcY * tanHalf)
+                       + ForwardDirection;
+        return new Geometry.Ray(EyePosition, Vector3.Normalize(fallback));
+    }
+
+    private static Vector3 Unproject(in Matrix4x4 inverseViewProjection, float x, float y, float z)
+    {
+        var v = Vector4.Transform(new Vector4(x, y, z, 1f), inverseViewProjection);
+        if (MathF.Abs(v.W) < 1e-9f) return new Vector3(v.X, v.Y, v.Z);
+        return new Vector3(v.X, v.Y, v.Z) / v.W;
     }
 
     /// <summary>世界坐标 → 屏幕像素坐标（用于标注文字覆盖层）。相机后方返回 null。</summary>
@@ -260,4 +328,37 @@ public sealed class OrbitCamera
         m.M43 = 2f * near * far / (near - far);
         return m;
     }
+
+    /// <summary>
+    /// 正交投影（OpenGL 约定，z∈[-1,1]，对称视锥）。
+    /// 与透视矩阵同结构下线性插值即可得到连续的 2D↔3D 过渡。
+    /// </summary>
+    public static Matrix4x4 CreateOrthographicGl(float halfWidth, float halfHeight, float near, float far)
+    {
+        float hw = MathF.Max(halfWidth, 1e-4f);
+        float hh = MathF.Max(halfHeight, 1e-4f);
+        var m = new Matrix4x4();
+        m.M11 = 1f / hw;
+        m.M22 = 1f / hh;
+        m.M33 = -2f / (far - near);
+        m.M43 = -(far + near) / (far - near);
+        m.M44 = 1f;
+        return m;
+    }
+
+    /// <summary>逐元素插值两个投影矩阵（行向量约定，两个矩阵结构一致时结果仍为合法投影）。</summary>
+    public static Matrix4x4 LerpMatrix(in Matrix4x4 a, in Matrix4x4 b, float t)
+    {
+        return new Matrix4x4(
+            Lerp(a.M11, b.M11, t), Lerp(a.M12, b.M12, t), Lerp(a.M13, b.M13, t), Lerp(a.M14, b.M14, t),
+            Lerp(a.M21, b.M21, t), Lerp(a.M22, b.M22, t), Lerp(a.M23, b.M23, t), Lerp(a.M24, b.M24, t),
+            Lerp(a.M31, b.M31, t), Lerp(a.M32, b.M32, t), Lerp(a.M33, b.M33, t), Lerp(a.M34, b.M34, t),
+            Lerp(a.M41, b.M41, t), Lerp(a.M42, b.M42, t), Lerp(a.M43, b.M43, t), Lerp(a.M44, b.M44, t));
+
+        static float Lerp(float x, float y, float w) => x + (y - x) * w;
+    }
+
+    /// <summary>把指定半径的外接球刚好放入视锥所需的相机距离（2D/3D 预设共用）。</summary>
+    public float ComputeFitDistance(float radius) =>
+        MathF.Max(radius, 1e-3f) / MathF.Sin(FieldOfView * 0.5f);
 }

@@ -22,7 +22,9 @@ public readonly record struct CameraSnapshot(
     ViewMode Mode,
     bool SsaaEnabled,
     Vector3 BackgroundTop,
-    Vector3 BackgroundBottom);
+    Vector3 BackgroundBottom,
+    // 1 = 2D canvas (flat shading, no grid fade), 0 = 3D view
+    float FlatShade);
 
 /// <summary>
 /// 查看器会话：持有模型、相机、标注、拾取器等状态。
@@ -50,12 +52,88 @@ public sealed class ViewerSession : INotifyPropertyChanged
 
     public ViewMode Mode { get; set; } = ViewMode.Shaded;
 
-    public bool SsaaEnabled { get; set; } = true;
+    /// <summary>抗锯齿（2x SSAA）：默认关闭，性能优先（可在工具栏手动开启）。</summary>
+    public bool SsaaEnabled { get; set; }
 
     public bool AnnotationMode { get; set; }
 
     /// <summary>移动模式：开启后左键拖拽拖动模型改变其世界坐标（与轨道旋转区分）。</summary>
     public bool MoveMode { get; set; }
+
+    // ---- 2D / 3D 视图布局与过渡动画 ----
+
+    private ViewLayout _layout = ViewLayout.ThreeD;
+    private ViewLayout _targetLayout = ViewLayout.ThreeD;
+    private float _transition = 1f;
+    private ViewPreset _fromPreset;
+    private ViewPreset _toPreset;
+    private float _flatStart;
+    private float _flatEnd;
+
+    /// <summary>当前布局（过渡结束后才切换）。</summary>
+    public ViewLayout Layout => _layout;
+
+    /// <summary>是否处于 2D 画布。</summary>
+    public bool IsTwoD => _layout == ViewLayout.TwoD;
+
+    /// <summary>是否正在播放 2D↔3D 过渡动画。</summary>
+    public bool IsViewTransitioning => _transition < 1f;
+
+    /// <summary>平涂系数：1 = 2D 画布（跳过光照），0 = 3D 视图；过渡期间线性变化。</summary>
+    public float FlatShade { get; private set; }
+
+    /// <summary>切换布局（带平滑过渡动画）。</summary>
+    public void SetLayout(ViewLayout layout)
+    {
+        var bounds = Model?.Mesh.Bounds
+            ?? new BoundingBox(new Vector3(-50f, -50f, -50f), new Vector3(50f, 50f, 50f));
+        float radius = MathF.Max(bounds.Radius, 1f);
+
+        _fromPreset = ViewTransitionMath.Capture(Camera);
+        _toPreset = ViewTransitionMath.CreatePreset(layout, bounds, Camera.ComputeFitDistance(radius));
+        _flatStart = FlatShade;
+        _flatEnd = layout == ViewLayout.TwoD ? 1f : 0f;
+        _targetLayout = layout;
+        _transition = 0f;
+        StatusText = layout == ViewLayout.TwoD ? "切换到 2D 画布…" : "切换到 3D 视图…";
+    }
+
+    /// <summary>立刻应用布局（不播放动画），用于加载模型时同步。</summary>
+    public void ApplyLayoutImmediate(ViewLayout layout)
+    {
+        var bounds = Model?.Mesh.Bounds
+            ?? new BoundingBox(new Vector3(-50f, -50f, -50f), new Vector3(50f, 50f, 50f));
+        var preset = ViewTransitionMath.CreatePreset(layout, bounds, Camera.ComputeFitDistance(MathF.Max(bounds.Radius, 1f)));
+        ViewTransitionMath.Apply(Camera, preset, preset, 1f);
+        _layout = _targetLayout = layout;
+        _transition = 1f;
+        FlatShade = layout == ViewLayout.TwoD ? 1f : 0f;
+        RebuildSnapshot();
+    }
+
+    /// <summary>按时间推进布局过渡（在 Update 内调用）。</summary>
+    public void UpdateViewTransition(float deltaSeconds)
+    {
+        if (_transition >= 1f) return;
+
+        _transition = MathF.Min(1f, _transition + deltaSeconds / ViewTransitionMath.DefaultDuration);
+        float eased = ViewTransitionMath.EaseInOutCubic(_transition);
+
+        ViewTransitionMath.Apply(Camera, _fromPreset, _toPreset, eased);
+        FlatShade = ViewTransitionMath.Lerp(_flatStart, _flatEnd, eased);
+
+        if (_transition >= 1f)
+        {
+            _layout = _targetLayout;
+            FlatShade = _layout == ViewLayout.TwoD ? 1f : 0f;
+            Camera.ProjectionBlend = _layout == ViewLayout.TwoD ? 0f : 1f;
+            StatusText = _layout == ViewLayout.TwoD
+                ? "2D 画布（俯视）：左键拖拽平移，滚轮缩放"
+                : "3D 视图：左键拖拽旋转，右键拖拽平移";
+        }
+
+        RebuildSnapshot();
+    }
 
     /// <summary>模型世界坐标变换（拖动改坐标的核心状态）。</summary>
     public ModelTransform Transform { get; } = new();
@@ -71,7 +149,7 @@ public sealed class ViewerSession : INotifyPropertyChanged
 
     private volatile SnapshotBox _snapshotBox = new(new(
         Matrix4x4.Identity, Matrix4x4.Identity, new Vector3(0, 0, 200), Matrix4x4.Identity,
-        ViewMode.Shaded, true, BgTop, BgBottom));
+        ViewMode.Shaded, false, BgTop, BgBottom, 0f));
 
     private volatile MarkerVertex[] _markers = Array.Empty<MarkerVertex>();
     private volatile float[] _measureLines = Array.Empty<float>();
@@ -173,6 +251,9 @@ public sealed class ViewerSession : INotifyPropertyChanged
         {
             Camera.FitToBounds(document.Mesh.Bounds);
             Camera.SnapToTarget();
+            // 保持当前布局：2D 画布下加载模型仍停在俯视
+            if (IsTwoD)
+                ApplyLayoutImmediate(ViewLayout.TwoD);
         }
 
         Annotations.Clear();
@@ -348,15 +429,17 @@ public sealed class ViewerSession : INotifyPropertyChanged
             Mode,
             SsaaEnabled,
             BgTop,
-            BgBottom));
+            BgBottom,
+            FlatShade));
     }
 
-    /// <summary>推进相机阻尼；返回是否仍在运动中。</summary>
+    /// <summary>推进布局过渡与相机阻尼；返回是否仍在运动（需要继续请求渲染帧）。</summary>
     public bool Update(float deltaSeconds)
     {
+        UpdateViewTransition(deltaSeconds);
         Camera.Update(deltaSeconds);
         RebuildSnapshot();
-        return Camera.IsSettling;
+        return Camera.IsSettling || IsViewTransitioning;
     }
 
     public void OnFrameRendered()

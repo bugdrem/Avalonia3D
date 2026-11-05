@@ -51,14 +51,71 @@ public partial class MainWindow : Window
         _ready = true;
     }
 
-    private void OnLoaded(object? sender, RoutedEventArgs e)
+    private async void OnLoaded(object? sender, RoutedEventArgs e)
     {
-        // 初始加载示例模型（GPU 上传延迟到首帧，无需等待 GL 上下文）
-        LoadDemoModel(0);
+        // 扫描 samples 目录并默认加载 teapot.obj（GPU 上传延迟到首帧，无需等待 GL 上下文）
+        LoadSampleList();
 
         _lastTickSeconds = _clock.Elapsed.TotalSeconds;
         _lastFpsSeconds = _lastTickSeconds;
         _tickTimer.Start();
+
+        if (_samples.Count > 0)
+            await LoadFileAsync(_samples[0].Path);
+    }
+
+    // ---------------------------------------------------------------- 示例模型
+
+    private sealed record SampleModel(string Display, string Path);
+
+    private readonly List<SampleModel> _samples = new();
+    private bool _suppressSampleSelection;
+
+    /// <summary>从程序目录向上查找 samples 目录（发布目录与开发目录都能命中）。</summary>
+    private static string? FindSamplesDirectory()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "samples");
+            if (Directory.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    private void LoadSampleList()
+    {
+        var dir = FindSamplesDirectory();
+        if (dir is null)
+        {
+            _session.StatusText = "未找到 samples 目录，请用「打开模型…」加载文件";
+            return;
+        }
+
+        var files = Directory.GetFiles(dir)
+            .Where(f => _session.Loaders.FindLoader(f) is not null)
+            .OrderBy(f => Path.GetFileName(f).Equals("teapot.obj", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in files)
+            _samples.Add(new SampleModel(Path.GetFileName(file), file));
+
+        _suppressSampleSelection = true;
+        SampleBox.ItemsSource = _samples.Select(s => s.Display).ToList();
+        if (_samples.Count > 0)
+            SampleBox.SelectedIndex = 0;
+        _suppressSampleSelection = false;
+
+        if (_samples.Count == 0)
+            _session.StatusText = "samples 目录中没有可识别的模型";
+    }
+
+    private void OnSampleModelChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready || !IsLoaded || _suppressSampleSelection) return;
+        int index = SampleBox.SelectedIndex;
+        if (index >= 0 && index < _samples.Count)
+            _ = LoadFileAsync(_samples[index].Path);
     }
 
     // ---------------------------------------------------------------- 帧循环（UI 线程）
@@ -155,40 +212,6 @@ public partial class MainWindow : Window
         await LoadFileAsync(files[0].Path.LocalPath);
     }
 
-    private void OnDemoModelChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (!_ready || !IsLoaded) return;
-        LoadDemoModel(DemoModelBox.SelectedIndex);
-    }
-
-    private void LoadDemoModel(int index)
-    {
-        try
-        {
-            var mesh = index switch
-            {
-                1 => DemoModels.CreateSteppedShaft(),
-                2 => DemoModels.CreateHexNut(),
-                3 => DemoModels.CreateTorusKnot(),
-                _ => DemoModels.CreateGear(),
-            };
-            var doc = new ModelDocument
-            {
-                Mesh = mesh,
-                FileName = "（内置示例）",
-                Format = "程序化生成",
-                LoadMilliseconds = 0,
-            };
-            _session.SetModel(doc);
-            Viewport.PushSceneToRenderer();
-            _session.StatusText = $"已加载示例模型: {mesh.Name}";
-        }
-        catch (Exception ex)
-        {
-            _session.StatusText = $"示例模型生成失败: {ex.Message}";
-        }
-    }
-
     private async Task LoadFileAsync(string path)
     {
         _session.IsLoading = true;
@@ -250,11 +273,31 @@ public partial class MainWindow : Window
         Viewport.RequestFrame();
     }
 
+    private void On2DToggleClick(object? sender, RoutedEventArgs e)
+    {
+        if (!_ready) return;
+        ApplyLayout(View2DToggle.IsChecked == true ? ViewLayout.TwoD : ViewLayout.ThreeD);
+    }
+
+    /// <summary>切换 2D/3D 布局（带过渡动画）。</summary>
+    private void ApplyLayout(ViewLayout layout)
+    {
+        _session.SetLayout(layout);
+        View2DToggle.IsChecked = layout == ViewLayout.TwoD;
+        Viewport.RequestFrame();
+    }
+
     private void OnStandardViewClick(object? sender, RoutedEventArgs e)
     {
         if (!_ready) return;
         if (sender is Button { Tag: string tag })
         {
+            // 标准方位属于 3D 视图：若处于 2D 或过渡中，先立即回到 3D
+            if (_session.IsTwoD || _session.IsViewTransitioning)
+            {
+                _session.ApplyLayoutImmediate(ViewLayout.ThreeD);
+                View2DToggle.IsChecked = false;
+            }
             _session.Camera.SetStandardView(Enum.Parse<StandardView>(tag));
             _session.RebuildSnapshot();
             Viewport.RequestFrame();
@@ -267,6 +310,8 @@ public partial class MainWindow : Window
         if (_session.Model != null)
         {
             _session.Camera.FitToBounds(_session.Model.Mesh.Bounds);
+            if (_session.IsTwoD)
+                _session.ApplyLayoutImmediate(ViewLayout.TwoD);
             _session.RebuildSnapshot();
             Viewport.RequestFrame();
         }
@@ -431,6 +476,11 @@ public partial class MainWindow : Window
             case Key.G:
                 // G：切换移动模型模式（拖动改坐标）
                 SetMoveMode(!_session.MoveMode);
+                e.Handled = true;
+                break;
+            case Key.T:
+                // T：2D 画布 / 3D 视图 切换（带过渡动画）
+                ApplyLayout(_session.IsTwoD ? ViewLayout.ThreeD : ViewLayout.TwoD);
                 e.Handled = true;
                 break;
         }

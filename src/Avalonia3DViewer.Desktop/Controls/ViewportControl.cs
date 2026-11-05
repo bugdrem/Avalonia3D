@@ -182,7 +182,8 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
                 snap.View, snap.Proj, snap.Eye, snap.Model,
                 width, height, fb,
                 snap.Mode, snap.SsaaEnabled,
-                snap.BackgroundTop, snap.BackgroundBottom));
+                snap.BackgroundTop, snap.BackgroundBottom,
+                snap.FlatShade));
         }
         catch (Exception ex)
         {
@@ -306,12 +307,17 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
         {
             DragModel(dx, dy, viewport, e.KeyModifiers);
         }
-        else if (_dragButton == DragButton.Left)
+        else if (_session.IsViewTransitioning)
+        {
+            // 过渡动画期间相机由动画驱动，忽略拖拽，避免与动画抢占状态
+        }
+        else if (_dragButton == DragButton.Left && !_session.IsTwoD)
         {
             _session.Camera.Rotate(dx, dy, viewport.Y);
         }
         else
         {
+            // 2D 画布：左/右键拖拽均为平移（保持平面视图不倾斜）
             _session.Camera.Pan(dx, dy, viewport.Y);
         }
 
@@ -412,7 +418,11 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
         var hit = _session.PickWorld(ray);
         if (hit.HasValue)
         {
-            _session.Camera.Target = hit.Value.Point;
+            // 2D 画布保持俯视：聚焦只移动目标点，不改变方位
+            var point = hit.Value.Point;
+            _session.Camera.Target = _session.IsTwoD
+                ? new Vector3(point.X, _session.Camera.Target.Y, point.Z)
+                : point;
             _session.RebuildSnapshot();
             RequestFrame();
         }
