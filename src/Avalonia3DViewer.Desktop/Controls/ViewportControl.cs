@@ -9,6 +9,7 @@ using Avalonia.Rendering;
 using Avalonia.Threading;
 using Avalonia3DViewer.Desktop.Rendering;
 using Avalonia3DViewer.Core.Camera;
+using Avalonia3DViewer.Core.Scene;
 using static Avalonia.OpenGL.GlConsts;
 
 namespace Avalonia3DViewer.Desktop.Controls;
@@ -60,6 +61,10 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
     private Vector3 _grabPlanePoint;    // 按下时与相机平行的抓取平面（过抓取点）
     private Vector3 _grabPlaneNormal;   // 平面法线 = 相机视线
     private int _axisLock;              // 0=自由, 1=屏幕水平, 2=屏幕垂直（Shift 锁定）
+
+    // 2D 草图绘制状态（仅 UI 线程访问）
+    private bool _sketching;
+    private Vector2 _sketchStartXZ;
 
     /// <summary>XAML 实例化使用；随后必须调用 <see cref="Attach"/>。</summary>
     public ViewportControl()
@@ -183,7 +188,7 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
                 width, height, fb,
                 snap.Mode, snap.SsaaEnabled,
                 snap.BackgroundTop, snap.BackgroundBottom,
-                snap.FlatShade));
+                snap.FlatShade, snap.FlatShading));
         }
         catch (Exception ex)
         {
@@ -222,7 +227,17 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
         _renderer.SetMarkers(_session.Markers);
         _renderer.SetMeasureLines(_session.MeasureLines);
 
+        PushSketchToRenderer();
+
         // 场景数据已变更：请求一帧以完成上传与绘制（相机静止时不会自动请求）
+        RequestFrame();
+    }
+
+    /// <summary>把草图三角化结果提交给渲染器（2D 画布绘制、3D 贴地共用同一份数据）。</summary>
+    public void PushSketchToRenderer()
+    {
+        var geometry = _session.BuildSketch();
+        _renderer.SetSketch(geometry.Fill, geometry.Outline);
         RequestFrame();
     }
 
@@ -242,10 +257,11 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
     /// <summary>按当前交互模式刷新光标（移动模式=四向移动，标注模式=十字，默认=箭头）。</summary>
     public void UpdateInteractionCursor()
     {
-        Cursor = _session.MoveMode
-            ? new Cursor(StandardCursorType.SizeAll)
-            : _session.AnnotationMode
-                ? new Cursor(StandardCursorType.Cross)
+        bool drawing = _session.IsTwoD && _session.SketchTool != SketchTool.None;
+        Cursor = drawing || _session.AnnotationMode
+            ? new Cursor(StandardCursorType.Cross)
+            : _session.MoveMode
+                ? new Cursor(StandardCursorType.SizeAll)
                 : Cursor.Default;
     }
 
@@ -264,9 +280,26 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
             : point.Properties.IsMiddleButtonPressed ? DragButton.Middle
             : DragButton.Left;
 
+        // 2D 画布 + 绘图工具 + 左键：在地板平面上绘制草图图元（优先于所有相机操作）
+        _sketching = false;
+        if (_session.IsTwoD && _session.SketchTool != SketchTool.None && _dragButton == DragButton.Left)
+        {
+            if (TryGetFloorPoint(_lastPosition, out var startXZ))
+            {
+                _sketching = true;
+                _sketchStartXZ = startXZ;
+                _session.SketchPreview = BuildPreviewShape(_session.SketchTool, startXZ, startXZ);
+                PushSketchToRenderer();
+            }
+        }
+
         // 移动模式 + 左键：开始拖动模型（改变世界坐标），而非旋转相机
         _movingModel = false;
-        if (_session.MoveMode && _dragButton == DragButton.Left && _session.Model != null)
+        if (_sketching)
+        {
+            // 绘图期间不进入其它交互
+        }
+        else if (_session.MoveMode && _dragButton == DragButton.Left && _session.Model != null)
         {
             _movingModel = true;
             _moveStartOffset = _session.Transform.Offset;
@@ -302,6 +335,18 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
         if (MathF.Abs(dx) + MathF.Abs(dy) > 3f) _moved = true;
 
         var viewport = ViewportSize;
+
+        if (_sketching)
+        {
+            if (TryGetFloorPoint(current, out var curXZ))
+            {
+                _session.SketchPreview = BuildPreviewShape(_session.SketchTool, _sketchStartXZ, curXZ);
+                PushSketchToRenderer();
+            }
+            _lastPosition = current;
+            e.Handled = true;
+            return;
+        }
 
         if (_movingModel)
         {
@@ -386,9 +431,12 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
         _movingModel = false;
         e.Pointer.Capture(null);
 
+        bool wasSketching = _sketching;
+        if (wasSketching) CommitSketch();
+
         var point = e.GetCurrentPoint(this);
         var pos = point.Position;
-        bool quickTap = !_moved && _clock.ElapsedMilliseconds - _pressTimestampMs < 600;
+        bool quickTap = !_moved && !wasSketching && _clock.ElapsedMilliseconds - _pressTimestampMs < 600;
 
         if (quickTap && _dragButton == DragButton.Left)
         {
@@ -426,6 +474,70 @@ public sealed class ViewportControl : OpenGlControlBase, ICustomHitTest
             _session.RebuildSnapshot();
             RequestFrame();
         }
+    }
+
+    // ---------------------------------------------------------------- 2D 草图画布
+
+    /// <summary>屏幕坐标 → 地板平面 XZ 坐标（正交俯视与透视视图都适用）。</summary>
+    private bool TryGetFloorPoint(Vector2 screen, out Vector2 xz)
+    {
+        var ray = _session.Camera.ScreenPointToRay(screen, ViewportSize);
+        if (SketchLayer.TryIntersectFloor(ray, _session.FloorY, out var world))
+        {
+            xz = new Vector2(world.X, world.Z);
+            return true;
+        }
+        xz = default;
+        return false;
+    }
+
+    /// <summary>由起止两点构造图元：矩形取包围盒，圆以起点为圆心、拖拽距离为半径。</summary>
+    private static SketchShape BuildPreviewShape(SketchTool tool, Vector2 start, Vector2 current)
+    {
+        if (tool == SketchTool.Circle)
+        {
+            return new SketchShape
+            {
+                Kind = SketchShapeKind.Circle,
+                Center = start,
+                Size = new Vector2(Vector2.Distance(start, current), 0f),
+            };
+        }
+
+        return new SketchShape
+        {
+            Kind = SketchShapeKind.Rectangle,
+            Center = (start + current) * 0.5f,
+            Size = Vector2.Abs(current - start) * 0.5f,
+        };
+    }
+
+    /// <summary>提交当前预览图元；尺寸过小视为误触丢弃。</summary>
+    private void CommitSketch()
+    {
+        _sketching = false;
+        var preview = _session.SketchPreview;
+        _session.SketchPreview = null;
+
+        if (preview is not null)
+        {
+            float refSize = _session.Model?.Mesh.Bounds.Radius ?? 50f;
+            float minSize = MathF.Max(refSize * 0.005f, 1e-4f);
+            float size = preview.Kind == SketchShapeKind.Circle
+                ? preview.Radius
+                : MathF.Max(preview.Size.X, preview.Size.Y);
+
+            if (size >= minSize)
+            {
+                _session.Sketch.Add(preview);
+                _session.RefreshSketchInfo();
+                _session.StatusText = preview.Kind == SketchShapeKind.Circle
+                    ? $"已添加圆：R {preview.Radius:F2} @ ({preview.Center.X:F1}, {preview.Center.Y:F1})"
+                    : $"已添加矩形：{preview.Size.X * 2:F2} × {preview.Size.Y * 2:F2} @ ({preview.Center.X:F1}, {preview.Center.Y:F1})";
+            }
+        }
+
+        PushSketchToRenderer();
     }
 
     /// <summary>单击：标注模式下放置/选中标注，否则提示。</summary>

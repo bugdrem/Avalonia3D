@@ -42,6 +42,12 @@ public static class GlslPreprocessor
             _ => "#version 100\nprecision mediump float;\n",
         };
 
+        // GLSL ES 1.00 没有 dFdx/dFdy（需 OES_standard_derivatives 扩展），平面着色在此档位关闭。
+        // 其余档位（330 / 150 / 300 es）均原生支持导数函数。
+        string defines = profile == GlslProfile.GlslEs100
+            ? "#define FLAT_SHADING 0\n"
+            : "#define FLAT_SHADING 1\n";
+
         var body = modernSource;
         if (profile == GlslProfile.GlslEs100)
         {
@@ -57,6 +63,6 @@ public static class GlslPreprocessor
                 .Replace("texture(", "texture2D(");
         }
 
-        return header + body;
+        return header + defines + body;
     }
 }

@@ -14,6 +14,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia3DViewer.Core;
 using Avalonia3DViewer.Core.Annotations;
+using Avalonia3DViewer.Core.Scene;
 using Avalonia3DViewer.Core.Camera;
 using Avalonia3DViewer.Core.Loading;
 using Avalonia3DViewer.Core.Procedural;
@@ -361,6 +362,74 @@ public partial class MainWindow : Window
     }
 
     /// <summary>切换移动模式（与标注模式互斥，避免单击语义冲突）。</summary>
+    // ---------------------------------------------------------------- 2D 草图
+
+    private void OnSketchToolChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready || !IsLoaded) return;
+        SetSketchTool(SketchToolBox.SelectedIndex switch
+        {
+            1 => SketchTool.Rectangle,
+            2 => SketchTool.Circle,
+            _ => SketchTool.None,
+        });
+    }
+
+    /// <summary>切换 2D 绘图工具（自动切到 2D 画布，并与移动/标注模式互斥）。</summary>
+    private void SetSketchTool(SketchTool tool)
+    {
+        if (!_ready) return;
+
+        if (tool != SketchTool.None)
+        {
+            // 绘图只发生在 2D 画布上：自动切换（带过渡动画）
+            if (!_session.IsTwoD && !_session.IsViewTransitioning)
+                ApplyLayout(ViewLayout.TwoD);
+
+            SetMoveMode(false);
+            SetAnnotationMode(false);
+        }
+
+        _session.SketchTool = tool;
+        int index = (int)tool;
+        if (SketchToolBox.SelectedIndex != index) SketchToolBox.SelectedIndex = index;
+        Viewport.UpdateInteractionCursor();
+
+        _session.StatusText = tool switch
+        {
+            SketchTool.Rectangle => "矩形工具：在 2D 画布上按住左键拖拽绘制（Esc 退出）",
+            SketchTool.Circle => "圆工具：从圆心向外拖拽，拖拽距离为半径（Esc 退出）",
+            _ => _session.IsTwoD ? "2D 画布：左键拖拽平移" : "3D 视图：左键拖拽旋转",
+        };
+    }
+
+    private void OnClearSketchClick(object? sender, RoutedEventArgs e)
+    {
+        if (!_ready) return;
+        if (_session.Sketch.Count == 0)
+        {
+            _session.StatusText = "草图已经是空的";
+            return;
+        }
+
+        _session.Sketch.Clear();
+        _session.SketchPreview = null;
+        _session.RefreshSketchInfo();
+        Viewport.PushSketchToRenderer();
+        _session.StatusText = "已清空 2D 草图";
+    }
+
+    private void OnFlatShadingToggleClick(object? sender, RoutedEventArgs e)
+    {
+        if (!_ready) return;
+        _session.FlatShading = FlatShadingToggle.IsChecked == true;
+        _session.RebuildSnapshot();
+        Viewport.RequestFrame();
+        _session.StatusText = _session.FlatShading
+            ? "平面着色开启：每个三角面单色（工程网格观感，与 XD2D/OCCT 显示一致）"
+            : "平面着色关闭：平滑法线插值（曲面连续观感）";
+    }
+
     private void SetMoveMode(bool enabled)
     {
         if (!_ready) return;
@@ -369,6 +438,11 @@ public partial class MainWindow : Window
         {
             _session.AnnotationMode = false;
             AnnotationToggle.IsChecked = false;
+        }
+        if (enabled && _session.SketchTool != SketchTool.None)
+        {
+            _session.SketchTool = SketchTool.None;
+            SketchToolBox.SelectedIndex = 0;
         }
         MoveToggle.IsChecked = enabled;
         Viewport.UpdateInteractionCursor();
@@ -386,6 +460,11 @@ public partial class MainWindow : Window
         {
             _session.MoveMode = false;
             MoveToggle.IsChecked = false;
+        }
+        if (enabled && _session.SketchTool != SketchTool.None)
+        {
+            _session.SketchTool = SketchTool.None;
+            SketchToolBox.SelectedIndex = 0;
         }
         AnnotationToggle.IsChecked = enabled;
         Viewport.UpdateInteractionCursor();
@@ -457,10 +536,11 @@ public partial class MainWindow : Window
                 }
                 break;
             case Key.Escape:
-                if (_session.AnnotationMode || _session.MoveMode)
+                if (_session.AnnotationMode || _session.MoveMode || _session.SketchTool != SketchTool.None)
                 {
                     SetAnnotationMode(false);
                     SetMoveMode(false);
+                    SetSketchTool(SketchTool.None);
                     _session.SelectedAnnotation = null;
                     _session.RefreshAnnotations();
                     Viewport.PushSceneToRenderer();
@@ -481,6 +561,22 @@ public partial class MainWindow : Window
             case Key.T:
                 // T：2D 画布 / 3D 视图 切换（带过渡动画）
                 ApplyLayout(_session.IsTwoD ? ViewLayout.ThreeD : ViewLayout.TwoD);
+                e.Handled = true;
+                break;
+            case Key.K:
+                // K：平面着色开关（每面单色，工程网格观感）
+                FlatShadingToggle.IsChecked = !(FlatShadingToggle.IsChecked == true);
+                OnFlatShadingToggleClick(this, new RoutedEventArgs());
+                e.Handled = true;
+                break;
+            case Key.D1 or Key.NumPad1:
+                // 1：矩形草图工具
+                SetSketchTool(_session.SketchTool == SketchTool.Rectangle ? SketchTool.None : SketchTool.Rectangle);
+                e.Handled = true;
+                break;
+            case Key.D2 or Key.NumPad2:
+                // 2：圆草图工具
+                SetSketchTool(_session.SketchTool == SketchTool.Circle ? SketchTool.None : SketchTool.Circle);
                 e.Handled = true;
                 break;
         }

@@ -29,7 +29,9 @@ public readonly record struct FrameState(
     Vector3 BackgroundTop,
     Vector3 BackgroundBottom,
     // FlatShade: 1 = 2D canvas (skip lighting, no grid distance fade), 0 = 3D view
-    float FlatShade = 0f);
+    float FlatShade = 0f,
+    // 平面着色：每个三角面一个法线（工程网格观感），由 dFdx/dFdy 在片元阶段求得
+    bool FlatShading = false);
 
 /// <summary>标注标记点（位置 + 颜色，颜色已按选中状态处理）。</summary>
 public readonly record struct MarkerVertex(Vector3 Position, Vector3 Color);
@@ -43,6 +45,7 @@ internal static class Glx
     public const int GL_UNSIGNED_INT = 0x1405;
     public const int GL_LEQUAL = 0x0203;
     public const int GL_PROGRAM_POINT_SIZE = 0x8862;
+    public const int GL_DYNAMIC_DRAW = 0x88E8;
 }
 
 /// <summary>
@@ -63,6 +66,7 @@ public sealed class GlRenderer : IDisposable
     private GlProgram? _pointProgram;
     private GlProgram? _bgProgram;
     private GlProgram? _blitProgram;
+    private GlProgram? _solidProgram;
 
     // ---- 模型 ----
     private MeshData? _pendingMesh;
@@ -92,6 +96,15 @@ public sealed class GlRenderer : IDisposable
     private int _measureVao, _measureVbo;
     private int _measureVertexCount;
     private bool _measureDirty;
+
+    // ---- 2D 草图图元（填充三角形 + 轮廓线段，pos3+color3） ----
+    private float[] _pendingSketchFill = Array.Empty<float>();
+    private float[] _pendingSketchOutline = Array.Empty<float>();
+    private int _sketchFillVao, _sketchFillVbo;
+    private int _sketchLineVao, _sketchLineVbo;
+    private int _sketchFillVertexCount;
+    private int _sketchLineVertexCount;
+    private bool _sketchDirty;
 
     // ---- 坐标三角（每帧重建） ----
     private int _triadVao, _triadVbo;
@@ -129,6 +142,8 @@ public sealed class GlRenderer : IDisposable
             ("aPos", 0));
         _blitProgram = CreateProgram(ShaderSources.BlitVertex, ShaderSources.BlitFragment,
             ("aPos", 0));
+        _solidProgram = CreateProgram(ShaderSources.SolidVertex, ShaderSources.SolidFragment,
+            ("aPos", 0), ("aColor", 1));
 
         // 全屏四边形（两个三角形，NDC 坐标）
         _quadVao = gl.GenVertexArray();
@@ -156,6 +171,8 @@ public sealed class GlRenderer : IDisposable
         _gridVao = gl.GenVertexArray(); _gridVbo = gl.GenBuffer();
         _markerVao = gl.GenVertexArray(); _markerVbo = gl.GenBuffer();
         _measureVao = gl.GenVertexArray(); _measureVbo = gl.GenBuffer();
+        _sketchFillVao = gl.GenVertexArray(); _sketchFillVbo = gl.GenBuffer();
+        _sketchLineVao = gl.GenVertexArray(); _sketchLineVbo = gl.GenBuffer();
 
         gl.Enable(GlConsts.GL_DEPTH_TEST);
         gl.DepthFunc(Glx.GL_LEQUAL);
@@ -203,6 +220,18 @@ public sealed class GlRenderer : IDisposable
         _measureDirty = true;
     }
 
+    /// <summary>
+    /// 提交 2D 草图图元的三角化结果（世界坐标，已落在指定地板高度）。
+    /// 填充与轮廓都走无光照的 solid 通道：2D 视图下关闭深度测试叠在最上层（纯画布语义），
+    /// 3D 视图下按真实深度贴在地板上、被模型正常遮挡。
+    /// </summary>
+    public void SetSketch(float[] fill, float[] outline)
+    {
+        _pendingSketchFill = fill ?? Array.Empty<float>();
+        _pendingSketchOutline = outline ?? Array.Empty<float>();
+        _sketchDirty = true;
+    }
+
     // ---------------------------------------------------------------- 帧渲染
 
     public void RenderFrame(in FrameState state)
@@ -234,6 +263,11 @@ public sealed class GlRenderer : IDisposable
         {
             UploadMeasure(_pendingMeasure);
             _measureDirty = false;
+        }
+        if (_sketchDirty)
+        {
+            UploadSketch(_pendingSketchFill, _pendingSketchOutline);
+            _sketchDirty = false;
         }
 
         // ---- 离屏目标 ----
@@ -281,6 +315,10 @@ public sealed class GlRenderer : IDisposable
         if (_measureVertexCount > 0) DrawMeasure(state);
         if (_markerCount > 0) DrawMarkers(state, renderScale);
 
+        // 草图图元（2D 画布 / 3D 贴地）
+        if (_sketchFillVertexCount > 0 || _sketchLineVertexCount > 0)
+            DrawSketch(state);
+
         // 坐标三角（屏幕空间，关闭深度）
         gl.Disable(GlConsts.GL_DEPTH_TEST);
         DrawTriad(state);
@@ -323,6 +361,7 @@ public sealed class GlRenderer : IDisposable
         _meshProgram.SetVec3("uCameraPos", state.Eye);
         _meshProgram.SetFloat("uHighlight", 0f);
         _meshProgram.SetFloat("uFlat", state.FlatShade);
+        _meshProgram.SetFloat("uFlatShade", state.FlatShading ? 1f : 0f);
         gl.BindVertexArray(_meshVao);
         gl.DrawElements(Glx.GL_TRIANGLES, _meshIndexCount, Glx.GL_UNSIGNED_INT, IntPtr.Zero);
     }
@@ -345,6 +384,40 @@ public sealed class GlRenderer : IDisposable
         SetupLineUniforms(state, depthBias: 0.0010f, useFade: 0f, model: state.Model);
         gl.BindVertexArray(_featureEdgeVao);
         gl.DrawArrays(Glx.GL_LINES, 0, _featureEdgeVertexCount);
+    }
+
+    /// <summary>
+    /// 绘制草图图元。2D 稳态关闭深度测试（后绘制 → 永远可见，等同于 canvas 绘制）；
+    /// 3D 视图保留深度测试并加微小偏移，让图形平铺在地板上并被模型正确遮挡。
+    /// </summary>
+    private void DrawSketch(in FrameState state)
+    {
+        var gl = _gl;
+        bool canvasMode = state.FlatShade > 0.995f;
+
+        if (canvasMode)
+            gl.Disable(GlConsts.GL_DEPTH_TEST);
+
+        _solidProgram!.Use();
+        _solidProgram.SetMatrix("uModel", Matrix4x4.Identity);
+        _solidProgram.SetMatrix("uView", state.View);
+        _solidProgram.SetMatrix("uProj", state.Proj);
+        // 3D 下抬一点，避免与地面网格共面闪烁；2D 下无深度测试，偏移无影响
+        _solidProgram.SetFloat("uDepthBias", canvasMode ? 0f : 0.0008f);
+
+        if (_sketchFillVertexCount > 0)
+        {
+            gl.BindVertexArray(_sketchFillVao);
+            gl.DrawArrays(Glx.GL_TRIANGLES, 0, _sketchFillVertexCount);
+        }
+        if (_sketchLineVertexCount > 0)
+        {
+            gl.BindVertexArray(_sketchLineVao);
+            gl.DrawArrays(Glx.GL_LINES, 0, _sketchLineVertexCount);
+        }
+
+        if (canvasMode)
+            gl.Enable(GlConsts.GL_DEPTH_TEST);
     }
 
     private void DrawMeshPoints(in FrameState state, int renderScale)
@@ -705,6 +778,41 @@ public sealed class GlRenderer : IDisposable
         gl.BindVertexArray(0);
     }
 
+    private void UploadSketch(float[] fill, float[] outline)
+    {
+        var gl = _gl;
+
+        _sketchFillVertexCount = fill.Length / 6;
+        if (_sketchFillVertexCount > 0)
+        {
+            gl.BindVertexArray(_sketchFillVao);
+            gl.BindBuffer(GlConsts.GL_ARRAY_BUFFER, _sketchFillVbo);
+            UploadBuffer(GlConsts.GL_ARRAY_BUFFER, fill, Glx.GL_DYNAMIC_DRAW);
+            int p = _solidProgram!.Attrib("aPos");
+            int c = _solidProgram!.Attrib("aColor");
+            gl.EnableVertexAttribArray(p);
+            gl.VertexAttribPointer(p, 3, GlConsts.GL_FLOAT, 0, 24, IntPtr.Zero);
+            gl.EnableVertexAttribArray(c);
+            gl.VertexAttribPointer(c, 3, GlConsts.GL_FLOAT, 0, 24, new IntPtr(12));
+        }
+
+        _sketchLineVertexCount = outline.Length / 6;
+        if (_sketchLineVertexCount > 0)
+        {
+            gl.BindVertexArray(_sketchLineVao);
+            gl.BindBuffer(GlConsts.GL_ARRAY_BUFFER, _sketchLineVbo);
+            UploadBuffer(GlConsts.GL_ARRAY_BUFFER, outline, Glx.GL_DYNAMIC_DRAW);
+            int p = _solidProgram!.Attrib("aPos");
+            int c = _solidProgram!.Attrib("aColor");
+            gl.EnableVertexAttribArray(p);
+            gl.VertexAttribPointer(p, 3, GlConsts.GL_FLOAT, 0, 24, IntPtr.Zero);
+            gl.EnableVertexAttribArray(c);
+            gl.VertexAttribPointer(c, 3, GlConsts.GL_FLOAT, 0, 24, new IntPtr(12));
+        }
+
+        gl.BindVertexArray(0);
+    }
+
     private void UploadMeasure(float[]? vertices)
     {
         var gl = _gl;
@@ -796,6 +904,7 @@ public sealed class GlRenderer : IDisposable
         _pointProgram?.Dispose();
         _bgProgram?.Dispose();
         _blitProgram?.Dispose();
+        _solidProgram?.Dispose();
 
         gl.DeleteBuffer(_meshVbo); gl.DeleteBuffer(_meshEbo); gl.DeleteVertexArray(_meshVao);
         gl.DeleteBuffer(_edgeVbo); gl.DeleteBuffer(_edgeEbo); gl.DeleteVertexArray(_edgeVao);
@@ -803,6 +912,8 @@ public sealed class GlRenderer : IDisposable
         gl.DeleteBuffer(_gridVbo); gl.DeleteVertexArray(_gridVao);
         gl.DeleteBuffer(_markerVbo); gl.DeleteVertexArray(_markerVao);
         gl.DeleteBuffer(_measureVbo); gl.DeleteVertexArray(_measureVao);
+        gl.DeleteBuffer(_sketchFillVbo); gl.DeleteVertexArray(_sketchFillVao);
+        gl.DeleteBuffer(_sketchLineVbo); gl.DeleteVertexArray(_sketchLineVao);
         gl.DeleteBuffer(_triadVbo); gl.DeleteVertexArray(_triadVao);
         gl.DeleteBuffer(_quadVbo); gl.DeleteVertexArray(_quadVao);
 

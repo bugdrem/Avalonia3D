@@ -39,7 +39,8 @@ in vec3 vWorld;
 
 uniform mat4 uCameraPos;
 uniform float uHighlight;
-uniform float uFlat;      // 1 = unlit flat fill (2D canvas), skips all lighting math
+uniform float uFlat;       // 1 = unlit flat fill (2D canvas), skips all lighting math
+uniform float uFlatShade;  // 1 = per-face normals (engineering mesh look, like OCCT STL display)
 
 out vec4 fragColor;
 
@@ -59,6 +60,17 @@ void main()
     vec3 n = normalize(vNormal);
     if (!gl_FrontFacing) n = -n;
 
+#if FLAT_SHADING
+    // Per-face normal from screen-space derivatives: zero extra vertex data.
+    // Gives the flat one-facet-per-triangle look of CAD mesh viewers.
+    if (uFlatShade > 0.5)
+    {
+        vec3 faceN = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+        if (dot(faceN, n) < 0.0) faceN = -faceN;
+        n = faceN;
+    }
+#endif
+
     // hemispheric ambient (sky / ground)
     vec3 sky = vec3(0.62, 0.68, 0.76);
     vec3 groundColor = vec3(0.42, 0.40, 0.37);
@@ -75,6 +87,38 @@ void main()
     color = mix(color, vec3(1.0, 0.52, 0.14), uHighlight);
 
     fragColor = vec4(color, 1.0);
+}
+";
+
+    // ---- solid (2D sketch shapes: flat fill + outline, no lighting, no depth tricks) ----
+    public const string SolidVertex = @"
+in vec3 aPos;
+in vec3 aColor;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uDepthBias;
+
+out vec3 vColor;
+
+void main()
+{
+    vColor = aColor;
+    vec4 clip = uProj * uView * uModel * vec4(aPos, 1.0);
+    clip.z -= uDepthBias * clip.w;   // lift slightly above the floor grid
+    gl_Position = clip;
+}
+";
+
+    public const string SolidFragment = @"
+in vec3 vColor;
+
+out vec4 fragColor;
+
+void main()
+{
+    fragColor = vec4(vColor, 1.0);
 }
 ";
 

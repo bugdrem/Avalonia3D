@@ -24,7 +24,9 @@ public readonly record struct CameraSnapshot(
     Vector3 BackgroundTop,
     Vector3 BackgroundBottom,
     // 1 = 2D canvas (flat shading, no grid fade), 0 = 3D view
-    float FlatShade);
+    float FlatShade,
+    // 平面着色：逐三角面法线（工程网格面片观感）
+    bool FlatShading);
 
 /// <summary>
 /// 查看器会话：持有模型、相机、标注、拾取器等状态。
@@ -59,6 +61,62 @@ public sealed class ViewerSession : INotifyPropertyChanged
 
     /// <summary>移动模式：开启后左键拖拽拖动模型改变其世界坐标（与轨道旋转区分）。</summary>
     public bool MoveMode { get; set; }
+
+    /// <summary>平面着色：每个三角面一个法线，呈现工程网格面片观感（性能几乎无额外开销）。</summary>
+    public bool FlatShading { get; set; }
+
+    // ---- 2D 画布草图（图元坐标落在世界地板平面，3D 视图直接贴地显示） ----
+
+    /// <summary>2D 草图图层：矩形/圆等图元，2D 画布绘制、3D 视图贴在地面上。</summary>
+    public SketchLayer Sketch { get; } = new();
+
+    /// <summary>当前绘图工具；仅 2D 画布下生效，与移动/标注模式互斥。</summary>
+    public SketchTool SketchTool { get; set; }
+
+    /// <summary>拖动中的预览图元（尚未提交，仅参与绘制）。</summary>
+    public SketchShape? SketchPreview { get; set; }
+
+    /// <summary>地板高度（世界 Y）：草图与地面网格共面，跟随当前模型底面。</summary>
+    public float FloorY { get; private set; }
+
+    /// <summary>三角化草图（含预览图元），供渲染器上传。</summary>
+    public SketchGeometry BuildSketch() => Sketch.Build(FloorY, SketchPreview);
+
+    private string _sketchInfo = "草图为空：切到 2D 画布后用矩形 / 圆工具拖拽绘制";
+
+    /// <summary>草图统计文本（右侧面板显示）。</summary>
+    public string SketchInfo
+    {
+        get => _sketchInfo;
+        private set => SetField(ref _sketchInfo, value);
+    }
+
+    /// <summary>刷新草图统计。</summary>
+    public void RefreshSketchInfo()
+    {
+        if (Sketch.Count == 0)
+        {
+            SketchInfo = "草图为空：切到 2D 画布后用矩形 / 圆工具拖拽绘制";
+            return;
+        }
+
+        int rect = 0, circle = 0, poly = 0;
+        foreach (var shape in Sketch.Shapes)
+        {
+            switch (shape.Kind)
+            {
+                case SketchShapeKind.Rectangle: rect++; break;
+                case SketchShapeKind.Circle: circle++; break;
+                default: poly++; break;
+            }
+        }
+
+        var parts = new List<string>(3);
+        if (rect > 0) parts.Add($"矩形 {rect}");
+        if (circle > 0) parts.Add($"圆 {circle}");
+        if (poly > 0) parts.Add($"多边形 {poly}");
+        SketchInfo = $"{string.Join(" · ", parts)}（共 {Sketch.Count} 个，贴合地板 Y={FloorY:F1}）";
+    }
 
     // ---- 2D / 3D 视图布局与过渡动画 ----
 
@@ -149,7 +207,7 @@ public sealed class ViewerSession : INotifyPropertyChanged
 
     private volatile SnapshotBox _snapshotBox = new(new(
         Matrix4x4.Identity, Matrix4x4.Identity, new Vector3(0, 0, 200), Matrix4x4.Identity,
-        ViewMode.Shaded, false, BgTop, BgBottom, 0f));
+        ViewMode.Shaded, false, BgTop, BgBottom, 0f, false));
 
     private volatile MarkerVertex[] _markers = Array.Empty<MarkerVertex>();
     private volatile float[] _measureLines = Array.Empty<float>();
@@ -247,6 +305,9 @@ public sealed class ViewerSession : INotifyPropertyChanged
         Transform.Reset();
         ModelPositionText = Transform.ToText();
 
+        // 草图贴地与地面网格共用同一高度：新模型的底面
+        FloorY = document.Mesh.Bounds.Min.Y;
+
         if (fitView)
         {
             Camera.FitToBounds(document.Mesh.Bounds);
@@ -276,6 +337,7 @@ public sealed class ViewerSession : INotifyPropertyChanged
     {
         Model = null;
         Raycaster = null;
+        FloorY = 0f;
         Annotations.Clear();
         SelectedAnnotation = null;
         RefreshAnnotations();
@@ -430,7 +492,8 @@ public sealed class ViewerSession : INotifyPropertyChanged
             SsaaEnabled,
             BgTop,
             BgBottom,
-            FlatShade));
+            FlatShade,
+            FlatShading));
     }
 
     /// <summary>推进布局过渡与相机阻尼；返回是否仍在运动（需要继续请求渲染帧）。</summary>

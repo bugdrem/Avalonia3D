@@ -30,6 +30,13 @@
                 </ComboBox>
 
                 <ToggleButton x:Name="View2DToggle" Content="2D 视图 (T)" Padding="8,5" Click="On2DToggleClick"/>
+                <!-- 2D 草图工具：选中后自动切到 2D 画布，拖拽即绘制 -->
+                <ComboBox x:Name="SketchToolBox" Width="104" SelectedIndex="0" SelectionChanged="OnSketchToolChanged"
+                          ToolTip.Tip="2D 画布绘图工具（矩形 / 圆）">
+                    <ComboBoxItem Content="草图：关"/>
+                    <ComboBoxItem Content="矩形 (1)"/>
+                    <ComboBoxItem Content="圆 (2)"/>
+                </ComboBox>
 
                 <TextBlock Text="方位" VerticalAlignment="Center" Margin="4,0,0,0" Foreground="#5A6675"/>
                 <Button Content="等轴测" Padding="8,5" Click="OnStandardViewClick" Tag="Isometric"/>
@@ -96,6 +103,25 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- 2D 草图（画布图元 → 3D 地板） -->
+                        <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="2D 草图" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Content="清空" Padding="7,3" FontSize="11" Click="OnClearSketchClick"/>
+                                    <ToggleButton x:Name="FlatShadingToggle" Content="平面着色" Padding="7,3" FontSize="11"
+                                                  Click="OnFlatShadingToggleClick"
+                                                  ToolTip.Tip="每个三角面单色，呈现工程网格面片观感"/>
+                                </StackPanel>
+                                <TextBlock Text="{Binding SketchInfo}" FontSize="12" Foreground="#1F4E79"
+                                           TextWrapping="Wrap" Margin="0,8,0,4"/>
+                                <TextBlock Text="图元直接画在世界地板平面上：2D 视图是正交画布，"
+                                           FontSize="11" Foreground="#8A94A3" TextWrapping="Wrap"/>
+                                <TextBlock Text="切到 3D 后同一批图形平铺在地板上并被模型遮挡。"
+                                           FontSize="11" Foreground="#8A94A3" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
                         <!-- 标注与测量 -->
                         <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="6" Padding="10">
                             <StackPanel>
@@ -134,7 +160,7 @@
                             <StackPanel>
                                 <TextBlock Text="操作说明" FontWeight="Bold" Margin="0,0,0,6"/>
                                 <TextBlock FontSize="12" LineHeight="20" TextWrapping="Wrap"
-                                           Text="T：2D 画布 / 3D 视图 切换（带过渡动画）&#x0a;3D：左键拖拽旋转，右键 / 中键平移&#x0a;2D：左键 / 右键拖拽均为平移&#x0a;滚轮：缩放&#x0a;移动模型 (G)：左键拖动改模型坐标，Shift 锁轴&#x0a;双击模型：聚焦到该点&#x0a;Delete：删除选中标注&#x0a;Esc：退出标注 / 移动模式&#x0a;F：适应视图&#x0a;R：重置视角"/>
+                                           Text="T：2D 画布 / 3D 视图 切换（带过渡动画）&#x0a;1 / 2：矩形 / 圆 草图工具（自动切到 2D）&#x0a;2D 下拖拽：绘制图元（草图工具关时=平移）&#x0a;3D：左键拖拽旋转，右键 / 中键平移&#x0a;K：平面着色开关（工程面片观感）&#x0a;滚轮：缩放&#x0a;移动模型 (G)：左键拖动改模型坐标，Shift 锁轴&#x0a;双击模型：聚焦到该点&#x0a;Delete：删除选中标注&#x0a;Esc：退出标注 / 移动 / 绘图模式&#x0a;F：适应视图&#x0a;R：重置视角"/>
                             </StackPanel>
                         </Border>
 
